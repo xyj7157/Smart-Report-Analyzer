@@ -1,0 +1,15 @@
+# 忽略环境变量文件（保护你的 API Key 和数据库密码）
+.env
+
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+.vscode/
+
+# 忽略无关的可执行文件和临时文件
+*.exe
+*.msi
+*.url
+temp_*.pdf
+*.tmp
+.idea/
