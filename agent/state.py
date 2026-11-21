@@ -13,4 +13,5 @@ class AgentState(TypedDict):
     metrics: dict
     growth_rate: float
     competitor_info: str
+    compliance_rules: str  # 存放检索到的合规法条
     final_summary: str

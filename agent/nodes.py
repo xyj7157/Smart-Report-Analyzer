@@ -5,6 +5,17 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from agent.state import AgentState, FinancialMetrics
 from core.tools import search_tool
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_milvus import Milvus
+
+# 初始化本地向量模型和 Milvus 连接
+MILVUS_URI = "http://localhost:19530"
+embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-zh-v1.5")
+vectorstore = Milvus(
+    embedding_function=embeddings,
+    collection_name="compliance_rules",
+    connection_args={"uri": MILVUS_URI},
+)
 
 # 初始化大模型
 llm = ChatOpenAI(
@@ -75,18 +86,43 @@ def search_competitor_node(state: AgentState):
     return {"competitor_info": competitor_text}
 
 
+def retrieve_compliance_node(state: AgentState):
+    print("--> [节点3.5] 正在检索 Milvus 合规知识库 (RAG)...")
+    company = state["metrics"].get("company_name", "未知公司")
+    industry = state["metrics"].get("industry", "未知行业")
+
+    # 拼装一个复合查询，让向量库去找相关的法条
+    query = f"{company} {industry} 行业 财务合规 信息披露 风险"
+    print(f"    [RAG查询词]: {query}")
+
+    # 去 Milvus 里搜最相关的 2 条法条
+    docs = vectorstore.similarity_search(query, k=2)
+    rules = "\n".join([doc.page_content for doc in docs])
+
+    print(f"    [检索完成] 命中 {len(docs)} 条合规条款。")
+    return {"compliance_rules": rules}
+
+
 def summary_node(state: AgentState):
     print("--> [节点4] 正在综合自身数据与竞品数据，生成对比研报...")
     metrics = state["metrics"]
     prompt = f"""
-    你是一个资深投资顾问。请根据以下数据，撰写一段财报分析摘要（约200字）：
+    你是一个资深金融投资与合规顾问。请根据以下数据，撰写一段财报分析摘要（约200字）：
+
+    【自身数据】
     公司：{metrics['company_name']} ({metrics['industry']})
-    本期营收：{metrics['revenue_current']} 亿元
-    上期营收：{metrics['revenue_previous']} 亿元
-    本期净利润：{metrics['net_profit']} 亿元
-    营收同比增长：{state['growth_rate']}%
-    同行竞品数据：{state['competitor_info']}
-    要求：客观评价，并结合同行做横向对比。
+    营收：{metrics['revenue_current']} 亿元，同比增长：{state['growth_rate']}%
+
+    【竞品数据】
+    {state['competitor_info']}
+
+    【合规法条参考 (RAG检索)】 
+    {state.get('compliance_rules', '无相关法条')}
+
+    要求：
+    1. 客观评价营收表现。
+    2. 结合竞品做横向对比。
+    3. 必须结合【合规法条参考】，提示该公司的潜在财务或信息披露风险。
     """
     response = llm.invoke(prompt)
     return {"final_summary": response.content}

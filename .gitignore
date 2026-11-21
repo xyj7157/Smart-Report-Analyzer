@@ -13,3 +13,5 @@ __pycache__/
 temp_*.pdf
 *.tmp
 .idea/
+# 忽略 Milvus 的数据持久化文件夹
+volumes/
