@@ -12,7 +12,11 @@
 
 ## 🛠️ 技术栈
 `Python` | `LangChain` | `LangGraph` | `DeepSeek` | `FastAPI` | `Streamlit` | `PostgreSQL` | `Plotly`
+## 🚀 核心功能演示
 
+
+### 💡 RAG 知识库增强
+结合 **Milvus 向量数据库**与 **BGE 中文词向量模型**，将私有合规法条（如《上市公司信息披露管理办法》）嵌入大模型推理链路，实现财报数据与法规条款的交叉验证，自动生成合规风险提示。
 ## 🏃 快速启动
 1. 克隆仓库并安装依赖：`pip install -r requirements.txt`
 2. 配置 `.env` 文件（填入 `DEEPSEEK_API_KEY`, `TAVILY_API_KEY` 及数据库连接串）。
