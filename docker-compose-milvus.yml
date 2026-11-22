@@ -1,6 +1,7 @@
 version: '3.5'
 
 services:
+  # ================= 向量数据库 =================
   etcd:
     container_name: milvus-etcd
     image: quay.io/coreos/etcd:v3.5.5
@@ -53,3 +54,36 @@ services:
     depends_on:
       - "etcd"
       - "minio"
+
+  # ================= 后端 FastAPI =================
+  backend:
+    container_name: report-backend
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      # 在容器网络里，连接 Milvus 用服务名 standalone
+      - MILVUS_URI=http://standalone:19530
+      - PG_URI=postgresql://eduagent_user:${POSTGRES_PASSWORD}@host.docker.internal:5433/eduagent
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # 允许容器访问你本机的 Postgres
+    depends_on:
+      - standalone
+
+  # ================= 前端 Streamlit =================
+  frontend:
+    container_name: report-frontend
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8501:8501"
+    environment:
+      # 在容器网络里，前端访问后端通过服务名 backend
+      - BACKEND_API_URL=http://backend:8000/analyze
+    depends_on:
+      - backend

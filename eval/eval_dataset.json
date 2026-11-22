@@ -1,0 +1,35 @@
+[
+  {
+    "id": 1,
+    "text": "贵州茅台酒股份有限公司发布2023年年报。报告期内，公司实现营业总收入1505.6亿元，去年同期为1275.5亿元。归属于上市公司股东的净利润为747.3亿元。",
+    "expected": {
+      "company_name": "贵州茅台酒股份有限公司",
+      "industry": "白酒",
+      "revenue_current": 1505.6,
+      "revenue_previous": 1275.5,
+      "net_profit": 747.3
+    }
+  },
+  {
+    "id": 2,
+    "text": "宁德时代2023年财报显示，公司实现营业收入4009.2亿元，同比增长22%。上年同期营收为3285.9亿元。全年净利润达到441.2亿元。",
+    "expected": {
+      "company_name": "宁德时代",
+      "industry": "新能源电池",
+      "revenue_current": 4009.2,
+      "revenue_previous": 3285.9,
+      "net_profit": 441.2
+    }
+  },
+  {
+    "id": 3,
+    "text": "腾讯控股发布财报，第四季度营收为1551.96亿元，上年同期为1449.54亿元。净利润为426.81亿元。",
+    "expected": {
+      "company_name": "腾讯控股",
+      "industry": "互联网科技",
+      "revenue_current": 1551.96,
+      "revenue_previous": 1449.54,
+      "net_profit": 426.81
+    }
+  }
+]

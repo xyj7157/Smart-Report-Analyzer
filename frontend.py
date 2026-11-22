@@ -4,7 +4,9 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-API_URL = "http://127.0.0.1:8000/analyze"
+import os
+# 如果环境变量里没有，默认用 localhost:8000（方便本地调试）
+API_URL = os.getenv("BACKEND_API_URL", "http://127.0.0.1:8000/analyze")
 
 st.set_page_config(page_title="智能财报分析系统", page_icon="📊", layout="wide")
 st.title("📊 智能财报分析系统 (全栈版)")
