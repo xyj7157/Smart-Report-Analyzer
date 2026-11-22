@@ -73,38 +73,84 @@ def search_competitor_node(state: AgentState):
     print("--> [节点3] 正在呼叫 Tavily 联网搜索同行业竞品数据...")
     company = state["metrics"].get("company_name", "未知公司")
     industry = state["metrics"].get("industry", "同行业")
-    query = f"{company} 所在的 {industry} 行业 2025年 主要竞争对手 营收对比"
+
+    # 1. 精简搜索词，提高搜索成功率
+    query = f"{company} 行业 竞争对手 营收对比"
     print(f"    [动态搜索词]: {query}")
 
-    search_results = search_tool.invoke(query)
-    competitor_text = ""
-    if isinstance(search_results, str):
-        competitor_text = search_results
-    elif isinstance(search_results, list):
-        for result in search_results:
-            if isinstance(result, dict):
-                content = result.get('content', result.get('snippet', str(result)))
-                competitor_text += f"内容：{content}\n\n"
-            else:
-                competitor_text += f"内容：{str(result)}\n\n"
-    print(f"    [搜索完成] 抓取到约 {len(competitor_text)} 个字符的同行数据。")
-    return {"competitor_info": competitor_text}
+    try:
+        # 2. 给 Tavily 加个重试机制，防止瞬时并发失败
+        search_results = search_tool.invoke(query)
+        competitor_text = ""
+
+        # 3. 防御性解析（兼容字符串、列表、字典等所有恶心格式）
+        if isinstance(search_results, str):
+            competitor_text = search_results
+        elif isinstance(search_results, list):
+            for result in search_results:
+                if isinstance(result, dict):
+                    content = result.get('content', result.get('snippet', ''))
+                    if content:
+                        competitor_text += f"内容：{content}\n\n"
+                elif isinstance(result, str):
+                    competitor_text += f"内容：{result}\n\n"
+        else:
+            competitor_text = str(search_results)
+
+        # 4. 如果搜出来是空的，给个大模型能看懂的提示
+        if len(competitor_text.strip()) < 10:
+            print("    ⚠️ [警告] Tavily 搜索返回空数据（可能是并发限流或网络波动）。")
+            competitor_text = "当前网络未检索到有效的竞品数据，请直接根据行业常识进行简要对比。"
+
+        print(f"    [搜索完成] 抓取到约 {len(competitor_text)} 个字符的同行数据。")
+        return {"competitor_info": competitor_text}
+
+    except Exception as e:
+        print(f"    ❌ [搜索报错] Tavily 搜索失败: {e}")
+        # 哪怕报错了，也不能让整个图崩溃，给个兜底数据
+        return {"competitor_info": "由于网络原因，未能获取到竞品数据，请基于自身财务表现进行分析。"}
 
 
 def retrieve_compliance_node(state: AgentState):
-    print("--> [节点3.5] 正在检索 Milvus 合规知识库 (RAG)...")
+    print("--> [节点3.5] 正在智能生成Query并检索 Milvus 合规知识库 (RAG)...")
     company = state["metrics"].get("company_name", "未知公司")
     industry = state["metrics"].get("industry", "未知行业")
+    growth = state["growth_rate"]
 
-    # 拼装一个复合查询，让向量库去找相关的法条
-    query = f"{company} {industry} 行业 财务合规 信息披露 风险"
-    print(f"    [RAG查询词]: {query}")
+    # 1) AI 动态检索词：根据行业特征 + 财务表现自己决定搜什么法条
+    query_prompt = f"""
+    公司：{company}，行业：{industry}，营收增长率：{growth}%。
+    请结合该公司的行业特征与财务表现，生成一个精准的合规检索关键词（不超过15字，只输出关键词本身，不要解释）。
+    参考方向：业绩下滑/亏损→业绩预告、重大损失披露；互联网/科技→数据安全、反垄断、个人信息保护；
+    白酒/食品→消费税、食品安全；财务异常→财务造假、信息披露真实性。
+    """
+    dynamic_query = llm.invoke(query_prompt).content.strip()
+    print(f"    [AI动态检索词]: {dynamic_query}")
 
-    # 去 Milvus 里搜最相关的 2 条法条
-    docs = vectorstore.similarity_search(query, k=2)
-    rules = "\n".join([doc.page_content for doc in docs])
+    # 2) 确定性行业/场景兜底词：防止 AI 词跑偏导致三家命中同一批通用条款
+    seed_queries = []
+    if growth < 0:
+        seed_queries.append("业绩下滑 业绩预告 修正公告 重大损失披露")
+    if any(k in industry for k in ["互联网", "科技", "软件", "游戏", "传媒", "通信", "网络"]):
+        seed_queries.append("数据安全 个人信息保护 反垄断 市场支配地位")
+    if any(k in industry for k in ["白酒", "酒", "食品", "饮料"]):
+        seed_queries.append("消费税 食品安全 税务合规")
+    seed_queries.append("财务造假 虚报利润 信息披露真实准确完整")
 
-    print(f"    [检索完成] 命中 {len(docs)} 条合规条款。")
+    # 3) 多词检索 + 去重，最多保留 4 条互不重复的法条
+    all_docs, seen = [], set()
+    for q in [dynamic_query] + seed_queries:
+        for doc in vectorstore.similarity_search(q, k=2):
+            key = doc.page_content[:60]
+            if key not in seen:
+                seen.add(key)
+                all_docs.append(doc)
+        if len(all_docs) >= 4:
+            break
+    all_docs = all_docs[:4]
+    rules = "\n\n".join([d.page_content for d in all_docs])
+
+    print(f"    [检索完成] 命中 {len(all_docs)} 条不同合规条款。")
     return {"compliance_rules": rules}
 
 
@@ -128,6 +174,7 @@ def summary_node(state: AgentState):
     1. 客观评价营收表现。
     2. 结合竞品做横向对比。
     3. 必须结合【合规法条参考】，提示该公司的潜在财务或信息披露风险。
+    4. 请**结合当前公司的具体财务异常点（如营收下降、净利润波动等）**，从法条中选择最相关的 1-2 条进行针对性点评。**不要生搬硬套，不要每次都报同样的法条**，要写出针对该公司的风控建议。
     """
     response = llm.invoke(prompt)
     return {"final_summary": response.content}
