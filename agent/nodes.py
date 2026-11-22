@@ -7,6 +7,10 @@ import os
 import re
 import json
 import psycopg
+from dotenv import load_dotenv
+
+load_dotenv()  # 确保 DEEPSEEK_API_KEY / POSTGRES_PASSWORD 等从 .env 加载
+
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from agent.state import AgentState, FinancialMetrics
@@ -207,8 +211,13 @@ def summary_node(state: AgentState):
 def save_to_db_node(state: AgentState):
     print("--> [节点5] 正在将研报写入 PostgreSQL 数据库存档...")
     metrics = state["metrics"]
-    # ⚠️ 换成你真实的密码
-    DB_URI = "postgresql://eduagent_user:123456@localhost:5433/eduagent"
+    # 数据库密码从 .env 读取，避免明文硬编码泄露
+    db_password = os.getenv("POSTGRES_PASSWORD", "")
+    db_host = os.getenv("POSTGRES_HOST", "localhost")
+    db_port = os.getenv("POSTGRES_PORT", "5433")
+    db_name = os.getenv("POSTGRES_DB", "eduagent")
+    db_user = os.getenv("POSTGRES_USER", "eduagent_user")
+    DB_URI = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
     try:
         with psycopg.connect(DB_URI, autocommit=True) as conn:
             with conn.cursor() as cur:
