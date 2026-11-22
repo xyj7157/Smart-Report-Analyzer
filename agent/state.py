@@ -11,6 +11,7 @@ class FinancialMetrics(BaseModel):
 class AgentState(TypedDict):
     raw_text: str
     metrics: dict
+    report_year: str  # 从财报原文识别的报告期年份（如 2025）
     growth_rate: float
     competitor_info: str
     compliance_rules: str  # 存放检索到的合规法条

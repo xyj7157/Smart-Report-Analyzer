@@ -4,6 +4,7 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 
 
 import os
+import re
 import json
 import psycopg
 from langchain_openai import ChatOpenAI
@@ -56,7 +57,13 @@ def extract_data_node(state: AgentState):
         metrics["revenue_current"] = round(metrics["revenue_current"] * 100000000, 2)
         metrics["revenue_previous"] = round(metrics.get("revenue_previous", 0) * 100000000, 2)
         metrics["net_profit"] = round(metrics.get("net_profit", 0) * 100000000, 2)
-    return {"metrics": metrics}
+
+    # 从财报原文提取报告期年份（前20页里的“2025年年度报告”），作为权威年份
+    year_match = re.search(r"(20\d{2})\s*年\s*年度报告", state["raw_text"][:3000])
+    report_year = year_match.group(1) if year_match else ""
+    print(f"    [报告期年份]: {report_year or '未识别，将由模型自行描述'}")
+
+    return {"metrics": metrics, "report_year": report_year}
 
 
 def calculate_node(state: AgentState):
@@ -157,24 +164,41 @@ def retrieve_compliance_node(state: AgentState):
 def summary_node(state: AgentState):
     print("--> [节点4] 正在综合自身数据与竞品数据，生成对比研报...")
     metrics = state["metrics"]
-    prompt = f"""
-    你是一个资深金融投资与合规顾问。请根据以下数据，撰写一段财报分析摘要（约200字）：
+    company = metrics['company_name']
+    report_year = state.get('report_year', '')
 
+    # 年份口径：以财报原文识别的年份为准，禁止模型自行推断
+    if report_year:
+        year_rule = (
+            f"★ 年份口径（强制）：本次分析的财报为【{report_year}年年度报告】。"
+            f"描述本公司数据时只能使用「{report_year}年」「本期」「上期」这类表述，"
+            f"绝对禁止把年份写成其他数字（如{int(report_year)-1}年、{int(report_year)-2}年）。"
+        )
+    else:
+        year_rule = "★ 年份口径（强制）：无法确定报告年份，描述本公司时只用「本期」「上期」，禁止编造任何具体年份数字。"
+
+    prompt = f"""
+    你是一个资深金融投资与合规顾问。请根据以下数据，撰写一段财报分析摘要（约200字）。
+
+    【本公司名称】{company}
     【自身数据】
-    公司：{metrics['company_name']} ({metrics['industry']})
+    公司：{company} ({metrics['industry']})
     营收：{metrics['revenue_current']} 亿元，同比增长：{state['growth_rate']}%
 
-    【竞品数据】
+    【竞品数据】（注意：这里面出现的年份和数值都是其他公司的，仅用于横向对比）
     {state['competitor_info']}
 
-    【合规法条参考 (RAG检索)】 
+    【合规法条参考 (RAG检索)】
     {state.get('compliance_rules', '无相关法条')}
 
-    要求：
-    1. 客观评价营收表现。
-    2. 结合竞品做横向对比。
-    3. 必须结合【合规法条参考】，提示该公司的潜在财务或信息披露风险。
-    4. 请**结合当前公司的具体财务异常点（如营收下降、净利润波动等）**，从法条中选择最相关的 1-2 条进行针对性点评。**不要生搬硬套，不要每次都报同样的法条**，要写出针对该公司的风控建议。
+    ★★★ 输出规则（必须严格遵守，违反视为错误）★★★
+    1. 【开头强制】摘要第一句必须以公司全称开头，格式为「{company}本期营收…」或「{company}202X年营收…」。禁止省略公司名，禁止只写「本期营收」「财报分析摘要」这类没有公司名的开头。
+    2. {year_rule}
+    3. 【年份隔离】竞品数据里出现的任何年份（如2023年、2024年）都是【其他公司】的数据年份，绝对不能套用到本公司身上。禁止把竞品的营收数值（如1505.6亿）写成"本公司某年的营收"，禁止拿竞品数值和本公司营收做跨年份的增减对比。
+    4. 【只用给定数据】本公司只使用上面【自身数据】给出的营收和增长率，不要编造本公司其他年份的历史营收。
+    5. 客观评价营收表现，结合竞品做横向对比（对比时用「竞品XX表现如何，本公司如何」的并列句式，不要跨年拼接数字）。
+    6. 必须结合【合规法条参考】，提示该公司的潜在财务或信息披露风险。
+    7. 结合当前公司的具体财务异常点（如营收下降、净利润波动等），从法条中选择最相关的 1-2 条针对性点评，不要生搬硬套、不要每次都报同样的法条。
     """
     response = llm.invoke(prompt)
     return {"final_summary": response.content}
