@@ -12,7 +12,9 @@ class AgentState(TypedDict):
     raw_text: str
     metrics: dict
     report_year: str  # 从财报原文识别的报告期年份（如 2025）
+    report_period: str  # 报告期类型：年度/第一季度/第二季度/第三季度/第四季度/半年度
     growth_rate: float
     competitor_info: str
     compliance_rules: str  # 存放检索到的合规法条
     final_summary: str
+    user_id: int  # 当前用户ID，用于数据隔离

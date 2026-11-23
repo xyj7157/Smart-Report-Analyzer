@@ -14,7 +14,7 @@ from core.pdf_parser import read_pdf_text
 
 
 @celery_app.task(bind=True)
-def analyze_report_task(self, file_path: str):
+def analyze_report_task(self, file_path: str, user_id: int):
     """
     异步处理财报的后台任务
     """
@@ -22,7 +22,7 @@ def analyze_report_task(self, file_path: str):
     try:
         # 1. 解析 PDF
         raw_text = read_pdf_text(file_path)
-        initial_state = {"raw_text": raw_text}
+        initial_state = {"raw_text": raw_text, "user_id": user_id}
 
         # 2. 跑 LangGraph（注：在后台任务里，我们直接通过 invoke 同步获取最终结果）
         # 如果你需要前端看到进度，可以在这里分阶段更新 self.update_state
