@@ -62,12 +62,41 @@ def extract_data_node(state: AgentState):
         metrics["revenue_previous"] = round(metrics.get("revenue_previous", 0) * 100000000, 2)
         metrics["net_profit"] = round(metrics.get("net_profit", 0) * 100000000, 2)
 
-    # 从财报原文提取报告期年份（前20页里的“2025年年度报告”），作为权威年份
-    year_match = re.search(r"(20\d{2})\s*年\s*年度报告", state["raw_text"][:3000])
-    report_year = year_match.group(1) if year_match else ""
-    print(f"    [报告期年份]: {report_year or '未识别，将由模型自行描述'}")
+    # ===== 用 LLM 从财报开头识别报告期（兼容年度/季度/港美股各种写法）=====
+    head = state["raw_text"][:1500]
+    period_prompt = f"""你是一个财报分析专家。请从下面的财报文本开头，识别出这份财报的报告期。
 
-    return {"metrics": metrics, "report_year": report_year}
+要求返回严格 JSON（不要 markdown 代码块）：
+{{"report_year": "年份数字，如 2026", "report_period": "报告期类型，如 第三季度/年度/半年度/第一季度/第二季度/第四季度"}}
+
+财报文本开头：
+{head}
+"""
+    try:
+        period_raw = llm.invoke(period_prompt).content
+        period_raw = period_raw.replace("```json", "").replace("```", "").strip()
+        period_info = json.loads(period_raw)
+        report_year = str(period_info.get("report_year", "")).strip()
+        report_period = str(period_info.get("report_period", "")).strip()
+    except Exception as e:
+        print(f"    ⚠️ LLM 识别报告期失败: {e}，启用正则兜底")
+        head3000 = state["raw_text"][:3000]
+        q = re.search(r"(20\d{2})\s*年\s*第([一二三四1-4])季度", head3000)
+        y = re.search(r"(20\d{2})\s*年\s*年度报告", head3000)
+        if q:
+            report_year = q.group(1)
+            cn = {"一": "第一季度", "二": "第二季度", "三": "第三季度", "四": "第四季度",
+                  "1": "第一季度", "2": "第二季度", "3": "第三季度", "4": "第四季度"}
+            report_period = cn.get(q.group(2), "季度")
+        elif y:
+            report_year = y.group(1)
+            report_period = "年度"
+        else:
+            report_year, report_period = "", ""
+
+    print(f"    [报告期(LLM识别)]: {report_year}年{report_period or '未识别'}")
+
+    return {"metrics": metrics, "report_year": report_year, "report_period": report_period}
 
 
 def calculate_node(state: AgentState):
@@ -81,45 +110,80 @@ def calculate_node(state: AgentState):
 
 
 def search_competitor_node(state: AgentState):
-    print("--> [节点3] 正在呼叫 Tavily 联网搜索同行业竞品数据...")
+    print("--> [节点3] 正在识别同行业竞品并联网搜索营收数据...")
     company = state["metrics"].get("company_name", "未知公司")
     industry = state["metrics"].get("industry", "同行业")
 
-    # 1. 精简搜索词，提高搜索成功率
-    query = f"{company} 行业 竞争对手 营收对比"
-    print(f"    [动态搜索词]: {query}")
+    # 1) 让 LLM 先根据具体行业列出真正的竞品名字（关键！）
+    name_prompt = f"""
+    你是一个行业分析师。{company} 属于「{industry}」行业。
+    请列出 3 家该行业与它最直接竞争、真实存在的公司名字。
+    只输出公司名，用中文逗号分隔，不要解释、不要编号。
+    示例格式：腾讯控股，哔哩哔哩，完美世界
+    """
+    names_raw = llm.invoke(name_prompt).content.strip()
+    # 兼容中英文逗号切分，最多取 3 家
+    names = [n.strip() for n in names_raw.replace("，", ",").split(",") if n.strip()][:3]
+    print(f"    [AI识别的同行业竞品]: {names}")
 
-    try:
-        # 2. 给 Tavily 加个重试机制，防止瞬时并发失败
-        search_results = search_tool.invoke(query)
-        competitor_text = ""
+    # 拿到 PDF 报告期（年 + 季度），用于竞品数据的时间线对齐
+    report_year = state.get("report_year", "")
+    report_period = state.get("report_period", "")
+    # 季度报告不加"年报"二字，避免搜索引擎误匹配年度数据
+    search_label = f"{report_year}年{report_period}" if report_year else ""
 
-        # 3. 防御性解析（兼容字符串、列表、字典等所有恶心格式）
-        if isinstance(search_results, str):
-            competitor_text = search_results
-        elif isinstance(search_results, list):
-            for result in search_results:
-                if isinstance(result, dict):
-                    content = result.get('content', result.get('snippet', ''))
-                    if content:
-                        competitor_text += f"内容：{content}\n\n"
-                elif isinstance(result, str):
-                    competitor_text += f"内容：{result}\n\n"
-        else:
-            competitor_text = str(search_results)
+    # 2) 针对每家竞品单独搜营收（优先带报告期，搜不到则降级重试）
+    competitor_text = ""
+    for name in names:
+        # 优先：带报告期精确搜索，让竞品数据和本公司报告期对齐
+        queries = []
+        if search_label:
+            queries.append(f"{name} {search_label} 营业收入")
+        queries.append(f"{name} 营业收入 年报")  # 兜底：不带年份
 
-        # 4. 如果搜出来是空的，给个大模型能看懂的提示
-        if len(competitor_text.strip()) < 10:
-            print("    ⚠️ [警告] Tavily 搜索返回空数据（可能是并发限流或网络波动）。")
-            competitor_text = "当前网络未检索到有效的竞品数据，请直接根据行业常识进行简要对比。"
+        chunk = ""
+        for query in queries:
+            print(f"    [搜索词]: {query}")
+            try:
+                results = search_tool.invoke(query)
+                # 防御性解析（Tavily 新版返回 dict，内含 results 列表）
+                # 统一抽成"条目列表"，只取 content，丢弃 query/images 等垃圾字段
+                if isinstance(results, dict):
+                    items = results.get("results", [])
+                elif isinstance(results, list):
+                    items = results
+                elif isinstance(results, str):
+                    items = [results]
+                else:
+                    items = []
 
-        print(f"    [搜索完成] 抓取到约 {len(competitor_text)} 个字符的同行数据。")
-        return {"competitor_info": competitor_text}
+                for item in items:
+                    if isinstance(item, dict):
+                        content = item.get("content", item.get("snippet", ""))
+                        if content:
+                            chunk += content + "\n"
+                    elif isinstance(item, str):
+                        chunk += item + "\n"
+                if not chunk.strip():
+                    chunk = str(results) if not isinstance(results, dict) else ""
 
-    except Exception as e:
-        print(f"    ❌ [搜索报错] Tavily 搜索失败: {e}")
-        # 哪怕报错了，也不能让整个图崩溃，给个兜底数据
-        return {"competitor_info": "由于网络原因，未能获取到竞品数据，请基于自身财务表现进行分析。"}
+                # 搜到有效内容就跳出，不再降级
+                if len(chunk.strip()) > 10:
+                    if search_label and query == queries[0]:
+                        print(f"    ✅ [{name}] 命中 {search_label} 同期数据")
+                    else:
+                        print(f"    ⚠️ [{name}] 未找到 {search_label or report_year} 数据，已用最新年报兜底")
+                    break
+            except Exception as e:
+                print(f"    ⚠️ 搜索失败: {e}")
+                continue
+
+        if chunk.strip():
+            competitor_text += f"【{name}】{chunk.strip()}\n\n"
+
+
+    print(f"    [搜索完成] 抓取到约 {len(competitor_text)} 个字符的同行数据。")
+    return {"competitor_info": competitor_text}
 
 
 def retrieve_compliance_node(state: AgentState):
@@ -170,16 +234,18 @@ def summary_node(state: AgentState):
     metrics = state["metrics"]
     company = metrics['company_name']
     report_year = state.get('report_year', '')
+    report_period = state.get('report_period', '')
+    period_label = f"{report_year}年{report_period}" if report_period else (f"{report_year}年" if report_year else "")
 
-    # 年份口径：以财报原文识别的年份为准，禁止模型自行推断
-    if report_year:
+    # 报告期口径：以财报原文识别的报告期为准，禁止模型自行推断
+    if period_label:
         year_rule = (
-            f"★ 年份口径（强制）：本次分析的财报为【{report_year}年年度报告】。"
-            f"描述本公司数据时只能使用「{report_year}年」「本期」「上期」这类表述，"
-            f"绝对禁止把年份写成其他数字（如{int(report_year)-1}年、{int(report_year)-2}年）。"
+            f"★ 报告期口径（强制）：本次分析的财报为【{period_label}】。"
+            f"描述本公司数据时只能使用「{period_label}」「本期」「上期」这类表述，"
+            f"绝对禁止把报告期写成年报或写成其他数字（如{int(report_year)-1}年、{int(report_year)-2}年）。"
         )
     else:
-        year_rule = "★ 年份口径（强制）：无法确定报告年份，描述本公司时只用「本期」「上期」，禁止编造任何具体年份数字。"
+        year_rule = "★ 报告期口径（强制）：无法确定报告期，描述本公司时只用「本期」「上期」，禁止编造任何具体年份数字。"
 
     prompt = f"""
     你是一个资深金融投资与合规顾问。请根据以下数据，撰写一段财报分析摘要（约200字）。
@@ -189,7 +255,7 @@ def summary_node(state: AgentState):
     公司：{company} ({metrics['industry']})
     营收：{metrics['revenue_current']} 亿元，同比增长：{state['growth_rate']}%
 
-    【竞品数据】（注意：这里面出现的年份和数值都是其他公司的，仅用于横向对比）
+    【竞品数据】（注意：这是同行业其他公司的数据，年份可能与本公司报告期不完全一致）
     {state['competitor_info']}
 
     【合规法条参考 (RAG检索)】
@@ -198,7 +264,7 @@ def summary_node(state: AgentState):
     ★★★ 输出规则（必须严格遵守，违反视为错误）★★★
     1. 【开头强制】摘要第一句必须以公司全称开头，格式为「{company}本期营收…」或「{company}202X年营收…」。禁止省略公司名，禁止只写「本期营收」「财报分析摘要」这类没有公司名的开头。
     2. {year_rule}
-    3. 【年份隔离】竞品数据里出现的任何年份（如2023年、2024年）都是【其他公司】的数据年份，绝对不能套用到本公司身上。禁止把竞品的营收数值（如1505.6亿）写成"本公司某年的营收"，禁止拿竞品数值和本公司营收做跨年份的增减对比。
+    3. 【年份隔离+标注】竞品数据里出现的任何年份都是【其他公司】的数据年份，绝对不能套用到本公司身上。禁止把竞品营收数值写成"本公司某年的营收"。★ 做横向对比时必须显式标注竞品数据年份：如果竞品年份不是「{period_label}」，要写明"竞品为202X年数据，与本公司{period_label}不完全同期"，禁止把旧年份数据当作同期直接对比。
     4. 【只用给定数据】本公司只使用上面【自身数据】给出的营收和增长率，不要编造本公司其他年份的历史营收。
     5. 客观评价营收表现，结合竞品做横向对比（对比时用「竞品XX表现如何，本公司如何」的并列句式，不要跨年拼接数字）。
     6. 必须结合【合规法条参考】，提示该公司的潜在财务或信息披露风险。
@@ -223,12 +289,13 @@ def save_to_db_node(state: AgentState):
             with conn.cursor() as cur:
                 insert_sql = """
                     INSERT INTO investment_reports 
-                    (company_name, industry, revenue_current, net_profit, growth_rate, competitor_info, final_summary)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (company_name, industry, revenue_current, net_profit, growth_rate, competitor_info, final_summary, user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """
                 cur.execute(insert_sql, (
                     metrics['company_name'], metrics['industry'], metrics['revenue_current'],
-                    metrics['net_profit'], state["growth_rate"], state["competitor_info"], state["final_summary"]
+                    metrics['net_profit'], state["growth_rate"], state["competitor_info"], state["final_summary"],
+        state.get("user_id", 0)
                 ))
         print("    ✅ [存档成功] 研报已安全存入数据库！")
     except Exception as e:
